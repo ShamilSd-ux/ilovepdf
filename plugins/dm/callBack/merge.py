@@ -1,101 +1,66 @@
 # fileName : plugins/dm/callBack/merge.py
 # copyright ©️ 2021 nabilanavab
+fileName = "plugins/dm/callBack/merge.py"
 
-# LOGGING INFO: DEBUG
-import logging
-logger=logging.getLogger(__name__)
-logging.basicConfig(
-                   level=logging.DEBUG,
-                   format="%(levelname)s:%(name)s:%(message)s" # %(asctime)s:
-                   )
+MERGE = {}
+MERGEsize = {}
 
-import os
-import time
-import shutil
-import asyncio
-from pdf import PROCESS
-from pyromod import listen
-from pyrogram import filters
-from configs.dm import Config
-from plugins.thumbName import (
-                              thumbName,
-                              formatThumb
-                              )
-from PyPDF2 import PdfFileMerger
-from plugins.checkPdf import checkPdf
-from pyrogram import Client as ILovePDF
-from configs.images import PDF_THUMBNAIL
-from plugins.footer import footer, header
-from plugins.progress import progress, uploadProgress
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+import os, time, asyncio, fitz
 
-#--------------->
-#--------> LOCAL VARIABLES
-#------------------->
+from plugins.render  import *
+from plugins.work    import work
+from logger          import logger
+from pyromod         import listen
+from pyrogram        import enums, filters
+from configs.config  import images, settings
+from pyrogram        import Client as ILovePDF
+from plugins.util    import getLang, translate
+from plugins.fncta   import thumbName, formatThumb
 
-MERGE = {}; MERGEsize = {}
-
-if Config.MAX_FILE_SIZE:
+if settings.MAX_FILE_SIZE:
     MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE"))
-    MAX_FILE_SIZE_IN_kiB=MAX_FILE_SIZE * (10 ** 6)
+    MAX_FILE_SIZE_IN_kiB = MAX_FILE_SIZE * (10 ** 6)
 else:
     MAX_FILE_SIZE = False
-
-#--------------->
-#--------> MERGE PDFS
-#------------------->
 
 merge = filters.create(lambda _, __, query: query.data == "merge")
 
 @ILovePDF.on_callback_query(merge)
 async def _merge(bot, callbackQuery):
     try:
-        if await header(bot, callbackQuery):
+        chat_id = callbackQuery.message.chat.id
+        lang_code = await getLang(chat_id)
+        if await header(bot, callbackQuery, lang_code = lang_code):
             return
         
-        chat_id = callbackQuery.message.chat.id
-        message_id = callbackQuery.message.message_id
-        
-        # CHECK IF BOT DOING ANY WORK
-        if chat_id in PROCESS:
-            return await callbackQuery.answer(
-                                             "Work in progress..🙇"
-                                             )
+        CHUNK, cancel = await translate(text = "merge", button = "document['cancelCB']", lang_code = lang_code)
+        cDIR = await work(callbackQuery, "create", False)
+        if not cDIR:
+            return await callbackQuery.answer(CHUNK["inWork"])
         await callbackQuery.answer()
-        PROCESS.append(chat_id)
-        fileId = callbackQuery.message.reply_to_message.document.file_id
-        fileSize = callbackQuery.message.reply_to_message.document.file_size
+        
         fileNm = callbackQuery.message.reply_to_message.document.file_name
         _, fileExt = os.path.splitext(fileNm)        # seperates name & extension
         # ADDING FILE ID & SIZE TO MERGE, MERGEsize LIST (FOR FUTURE USE)
-        MERGE[chat_id] = [fileId]
-        MERGEsize[chat_id] = [fileSize]
+        MERGE[chat_id] = [callbackQuery.message.reply_to_message.document.file_id]
+        MERGEsize[chat_id] = [callbackQuery.message.reply_to_message.document.file_size]
+        
         # REQUEST FOR OTHER PDFS FOR MERGING
         nabilanavab = True; size = 0
         while(nabilanavab):
-            if len(MERGE[chat_id]) >= 5:
-                await callbackQuery.message.reply(
-                                                 "__Due to Overload you can only merge 5 pdfs at a time__",
-                                                 quote=True
-                                                 )
+            if len(MERGE[chat_id]) >= 10:
+                await callbackQuery.message.reply(CHUNK["load"], quote=True)
                 nabilanavab = False
                 break
             askPDF = await bot.ask(
-                                text = "__MERGE pdfs » Total pdfs in queue: {}__\n\n"
-                                       "/exit __to cancel__\n"
-                                       "/merge __to merge__".format(
-                                                                   len(MERGE[chat_id])
-                                                                   ),
-                                chat_id = chat_id,
-                                reply_to_message_id = message_id,
-                                filters = None
-                                )
+                text = CHUNK["pyromodASK"].format(len(MERGE[chat_id])),
+                chat_id = chat_id, reply_to_message_id = callbackQuery.message.id, filters = None
+            )
             if askPDF.text == "/exit":
-                await askPDF.reply(
-                                  "`Process Cancelled..` 😏",
-                                  quote = True
-                                  )
-                PROCESS.remove(chat_id); del MERGE[chat_id]; del MERGEsize[chat_id]
+                await askPDF.reply(CHUNK["exit"], quote=True)
+                await work(callbackQuery, "delete", False)
+                del MERGE[chat_id]
+                del MERGEsize[chat_id]
                 break
             if askPDF.text == "/merge":
                 nabilanavab = False
@@ -110,9 +75,9 @@ async def _merge(bot, callbackQuery):
                     for _ in MERGEsize[chat_id]:
                         size = int(_) + size
                     # CHECKS MAXIMUM FILE SIZE (IF ADDED) ELSE 1.8 GB LIMIT
-                    if (MAX_FILE_SIZE and MAX_FILE_SIZE_IN_kiB <= int(size)) or int(size) >= 1800000000:
+                    if (MAX_FILE_SIZE and MAX_FILE_SIZE_IN_kiB <= int(size)) or int(size) >= 2000000000:
                         await callbackQuery.message.reply(
-                            f"`Due to Overload Bot Only Support %sMb pdfs..`😐"%(MAX_FILE_SIZE if MAX_FILE_SIZE else "1.8Gb")
+                            CHUNK["sizeLoad"] %(MAX_FILE_SIZE if MAX_FILE_SIZE else "1.8Gb")
                         )
                         nabilanavab = False
                         break
@@ -121,113 +86,70 @@ async def _merge(bot, callbackQuery):
                     MERGEsize[chat_id].append(file_size)
         # nabilanavab=True ONLY IF PROCESS CANCELLED
         if nabilanavab == True:
-            PROCESS.remove(chat_id)
+            return await work(callbackQuery, "delete", False)
+        
         # GET /merge, REACHES MAX FILE SIZE OR MAX NO OF PDF
         if nabilanavab == False:
             # DISPLAY TOTAL PDFS FOR MERGING
-            downloadMessage = await askPDF.reply_text(
-                                                     f"`Total PDF's : {len(MERGE[chat_id])}`.. 💡",
-                                                     quote = True
-                                                     )
-            asyncio.sleep(.5); i = 0
+            dlMSG = await askPDF.reply_text(
+                CHUNK["total"].format(len(MERGE[chat_id])),
+                quote = True, reply_markup = cancel
+            )
+            await asyncio.sleep(.5); i = 0
             # ITERATIONS THROUGH FILE ID'S AND DOWNLOAD
             for iD in MERGE[chat_id]:
-                await downloadMessage.edit(
-                                          f"__Started Downloading Pdf :{i+1} 📥__"
-                                          )
-                # START DOWNLOAD
-                c_time = time.time()
+                await dlMSG.edit(
+                    CHUNK["current"].format({i+1}), reply_markup = cancel
+                )
                 downloadLoc = await bot.download_media(
-                                                    message = iD,
-                                                    file_name = f"merge{chat_id}/{i}.pdf",
-                                                    progress = progress,
-                                                    progress_args = (
-                                                                    MERGEsize[chat_id][i],
-                                                                    downloadMessage,
-                                                                    c_time
-                                                                    )
-                                                    )
-                # CHECKS IF DOWNLOAD COMPLETE/PROCESS CANCELLED
-                if downloadLoc is None:
-                    PROCESS.remove(chat_id)
-                    await callbackQuery.message.reply_text(
-                                                          "`Merge Process Cancelled.. 😏`",
-                                                          quote = True
-                                                          )
-                    shutil.rmtree(f"merge{chat_id}")
-                    return
+                    message = iD, file_name = f"{cDIR}/{i}.pdf",
+                    progress = progress, progress_args = (
+                        MERGEsize[chat_id][i], dlMSG, time.time()
+                    )
+                )
                 # CHECKS PDF CODEC, ENCRYPTION..
-                checked, noOfPg = await checkPdf(
-                                                f"merge{chat_id}/{i}.pdf",
-                                                callbackQuery
-                                                )
+                checked, noOfPg = await checkPdf(f"{cDIR}/{i}.pdf", callbackQuery)
                 # REMOVE FILE FROM DIRECTORY IF FILE NOT ENCRYPTED OR CODECERROR
                 if not(checked=="pass"):
-                    os.remove(f"merge{chat_id}/{i}.pdf")
+                    os.remove(f"{cDIR}/{i}.pdf")
                 i += 1
-            directory = f'merge{chat_id}'
+            
+            directory = f'{cDIR}'
             pdfList = [os.path.join(directory, file) for file in os.listdir(directory)]
             # SORT DIRECTORY PATH BY ITS MODIFIED TIME
             pdfList.sort(key = os.path.getctime)
             numbPdf = len(pdfList)
             # MERGING STARTED
-            await downloadMessage.edit(
-                                      "__Merging Started.. __ 🪄"
-                                      )
-            output_pdf = f"merge{chat_id}/merge.pdf"
-            #PyPDF 2
-            merger=PdfFileMerger()
-            for i in pdfList:
-                merger.append(i)
-            merger.write(output_pdf)
+            await dlMSG.edit(CHUNK["started"], reply_markup = cancel)
+            output_pdf = f"{cDIR}/merge.pdf"
             
-            # Getting thumbnail
-            thumbnail, fileName = await thumbName(callbackQuery.message, fileNm)
-            if PDF_THUMBNAIL != thumbnail:
+            with fitz.open() as result:
+                for pdf in pdfList:
+                    with fitz.open(pdf) as mfile:
+                        result.insert_pdf(mfile)
+                result.save(output_pdf)
+            
+            FILE_NAME, FILE_CAPT, THUMBNAIL = await thumbName(callbackQuery.message, fileNm)
+            if images.PDF_THUMBNAIL != THUMBNAIL:
                 location = await bot.download_media(
-                                        message = thumbnail,
-                                        file_name = f"{callbackQuery.message.message_id}.jpeg"
-                                        )
-                thumbnail = await formatThumb(location)
+                    message = THUMBNAIL,
+                    file_name = f"{cDIR}/{callbackQuery.message.id}.jpeg"
+                )
+                THUMBNAIL = await formatThumb(location)
             
-            await downloadMessage.edit(
-                                      "`Started Uploading..` 📤"
-                                      )
-            await callbackQuery.message.reply_chat_action(
-                                                         "upload_document"
-                                                         )
-            c_time = time.time()
-            # SEND DOCUMENT
-            with open(output_pdf, "rb") as outPut:
-                await askPDF.reply_document(
-                                           file_name = fileName,
-                                           quote = True,
-                                           document = outPut,
-                                           thumb = thumbnail,
-                                           caption = "`merged pdf 🙂`",
-                                           progress = uploadProgress,
-                                           progress_args = (
-                                                           downloadMessage,
-                                                           c_time
-                                                           )
-                                           )
-            await downloadMessage.delete()
-            try:
-                os.remove(location)
-            except Exception: pass
-            shutil.rmtree(f"merge{chat_id}")
-            PROCESS.remove(chat_id)
-            await footer(callbackQuery.message, False)
+            await dlMSG.edit(CHUNK["upload"], reply_markup = cancel)
+            if await work(callbackQuery, "check", False):
+                await callbackQuery.message.reply_chat_action(enums.ChatAction.UPLOAD_DOCUMENT)
+                with open(output_pdf, "rb") as outPut:
+                    await askPDF.reply_document(
+                        file_name = FILE_NAME, quote = True, document = outPut, thumb = THUMBNAIL,
+                        caption = f"{CHUNK['caption']}\n\n{FILE_CAPT}", progress = uploadProgress,
+                        progress_args = ( dlMSG, time.time() )
+                    )
+            await dlMSG.delete()
+            await work(callbackQuery, "delete", False)
     except Exception as e:
-        logger.exception(
-                        "MERGE:CAUSES %(e)s ERROR",
-                        exc_info=True
-                        )
-        try:
-            shutil.rmtree(f"merge{chat_id}")
-            PROCESS.remove(chat_id)
-            os.remove(location)
-        except Exception:
-            pass
+        logger.exception("🐞 %s: %s" %(fileName, e), exc_info = True)
+        await work(callbackQuery, "delete", False)
 
-#                                                                                  Telegram: @nabilanavab
+# ==================================================================================================================================[ NABIL A NAVAB -> TG: nabilanavab]
